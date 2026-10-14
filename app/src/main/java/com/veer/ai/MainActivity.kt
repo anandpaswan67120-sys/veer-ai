@@ -40,7 +40,6 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import java.net.URLEncoder
 import java.util.Locale
-import kotlin.math.abs
 
 class MainActivity : ComponentActivity() {
     private var tts: TextToSpeech? = null
@@ -70,8 +69,24 @@ class MainActivity : ComponentActivity() {
 data class ContactItem(val name: String, val number: String)
 data class AppItem(val label: String, val pkg: String)
 
+// ---------- हिंदी को अंग्रेज़ी में बदलने वाली सूची (आवाज़ के लिए) ----------
+val hindiToEnglish = mapOf(
+    "फ्लिपकार्ट" to "flipkart", "फ्लिप कार्ट" to "flipkart", "फ्लिपकार्ट" to "flipkart",
+    "अजियो" to "ajio", "एजियो" to "ajio", "मीशो" to "meesho", "मीसो" to "meesho",
+    "अमेज़न" to "amazon", "अमेजन" to "amazon", "ज़ोमैटो" to "zomato", "जोमैटो" to "zomato",
+    "स्विगी" to "swiggy", "ओला" to "ola", "उबर" to "uber", "रैपिडो" to "rapido",
+    "व्हाट्सएप" to "whatsapp", "व्हाट्सऐप" to "whatsapp", "वाट्सएप" to "whatsapp",
+    "यूट्यूब" to "youtube", "इंस्टाग्राम" to "instagram", "इंस्टा" to "instagram",
+    "फेसबुक" to "facebook", "क्रोम" to "chrome", "जीमेल" to "gmail",
+    "स्पॉटिफाई" to "spotify", "पेटीएम" to "paytm", "फोटो" to "photos",
+    "गूगल मैप्स" to "maps", "मैप्स" to "maps", "मैप" to "maps",
+    "कैमरा" to "camera", "कैलकुलेटर" to "calculator", "कैलक्युलेटर" to "calculator",
+    "सेटिंग्स" to "settings", "सेटिंग" to "settings", "कैलेंडर" to "calendar",
+    "नोट्स" to "notes", "गूगल" to "google", "जूम" to "zoom", "नेटफ्लिक्स" to "netflix",
+    "हॉटस्टार" to "hotstar", "प्राइम" to "prime", "ट्विटर" to "twitter", "एक्स" to "x"
+)
+
 // ---------- टॉर्च ----------
-// सिर्फ तभी टॉर्च का आदेश मानो जब टॉर्च का शब्द + चालू/बंद दोनों में से कोई शब्द हो
 fun torchCommand(heard: String): Boolean? {
     val c = heard.lowercase()
     val torchWords = listOf("टॉर्च", "टार्च", "torch", "फ्लैश", "फ्लैशलाइट", "flashlight", "flash", "लाइट", "light")
@@ -165,53 +180,53 @@ fun playSong(context: Context, query: String): String {
 // ---------- सभी ऐप ----------
 val fillerWords = setOf(
     "वीर", "veer", "खोलो", "खोल", "खोलिए", "ओपन", "open", "को", "ko",
-    "ऐप", "app", "कर", "करो", "जरा", "please"
+    "ऐप", "app", "कर", "करो", "जरा", "please", "on", "ऑन"
 )
 
-val appAliases = mapOf(
-    "व्हाट्सएप" to "whatsapp", "व्हाट्सऐप" to "whatsapp", "वाट्सएप" to "whatsapp",
-    "यूट्यूब" to "youtube", "इंस्टाग्राम" to "instagram", "इंस्टा" to "instagram",
-    "फेसबुक" to "facebook", "क्रोम" to "chrome", "जीमेल" to "gmail",
-    "स्पॉटिफाई" to "spotify", "पेटीएम" to "paytm", "फोटो" to "photos",
-    "गूगल मैप्स" to "maps", "मैप्स" to "maps", "मैप" to "maps",
-    "कैमरा" to "camera", "कैलकुलेटर" to "calculator", "कैलक्युलेटर" to "calculator",
-    "सेटिंग्स" to "settings", "सेटिंग" to "settings", "कैलेंडर" to "calendar",
-    "नोट्स" to "notes", "गूगल" to "google"
-)
-
+// बोली गई बात को ऐप के नाम के करीब लाना
 fun cleanAppQuery(heard: String): String {
     val words = heard.split(" ")
         .map { it.trim() }
         .filter { it.isNotBlank() && it.lowercase() !in fillerWords }
     var q = words.joinToString(" ")
-    for ((hi, en) in appAliases.entries.sortedByDescending { it.key.length }) {
+    for ((hi, en) in hindiToEnglish.entries.sortedByDescending { it.key.length }) {
         q = q.replace(hi, en, ignoreCase = true)
     }
     return q
 }
 
-fun normalize(s: String): String = s.lowercase().replace(" ", "")
+// अक्षर, अंक के अलावा सब हटाकर तुलना के लिए छोटा करना
+fun normalize(s: String): String = s.lowercase().filter { it.isLetterOrDigit() }
 
 fun installedApps(context: Context): List<AppItem> {
-    val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
     val pm = context.packageManager
+    val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
     return pm.queryIntentActivities(intent, 0)
         .map { AppItem(it.loadLabel(pm).toString(), it.activityInfo.packageName) }
         .distinctBy { it.pkg }
 }
 
+// ऐप ढूँढना: पूरा मेल, फिर एक-दूसरे में शामिल होना, फिर शब्दों का मेल
 fun findApp(context: Context, query: String): AppItem? {
     val q = normalize(query)
     if (q.isBlank()) return null
     val apps = installedApps(context)
-    val exact = apps.firstOrNull { normalize(it.label) == q }
-    if (exact != null) return exact
-    return apps
-        .filter { app ->
-            val l = normalize(app.label)
-            l.isNotBlank() && (l.contains(q) || (l.length >= 3 && q.contains(l)))
-        }
-        .minByOrNull { abs(normalize(it.label).length - q.length) }
+
+    apps.firstOrNull { normalize(it.label) == q }?.let { return it }
+
+    apps.filter { app ->
+        val l = normalize(app.label)
+        l.isNotBlank() && (l.contains(q) || q.contains(l))
+    }.minByOrNull { abs(normalize(it.label).length - q.length) }?.let { return it }
+
+    val qWords = query.lowercase().split(" ").filter { it.length >= 3 }
+    if (qWords.isNotEmpty()) {
+        apps.firstOrNull { app ->
+            val label = app.label.lowercase()
+            qWords.any { w -> label.contains(w) }
+        }?.let { return it }
+    }
+    return null
 }
 
 fun launchApp(context: Context, app: AppItem): Boolean {
@@ -299,7 +314,6 @@ fun startListening(context: Context, onResult: (List<String>) -> Unit, onStatus:
     recognizer.startListening(intent)
 }
 
-// सभी आदेशों को एक जगह से चलाना
 fun commandReply(context: Context, h: String): String? {
     torchCommand(h)?.let { return setTorch(context, it) }
     volumeCommand(context, h)?.let { return it }
