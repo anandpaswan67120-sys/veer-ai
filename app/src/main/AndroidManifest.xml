@@ -10,6 +10,7 @@
         <package android:name="com.google.android.apps.maps" />
         <package android:name="com.google.android.calculator" />
         <package android:name="com.android.calculator2" />
+        <package android:name="com.vivo.calculator" />
         <package android:name="com.android.camera" />
         <package android:name="com.android.camera2" />
         <package android:name="com.android.settings" />
