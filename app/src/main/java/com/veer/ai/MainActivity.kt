@@ -4,6 +4,9 @@ import android.Manifest
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraManager
+import android.media.AudioManager
 import android.net.Uri
 import android.os.Bundle
 import android.provider.ContactsContract
@@ -67,13 +70,99 @@ class MainActivity : ComponentActivity() {
 data class ContactItem(val name: String, val number: String)
 data class AppItem(val label: String, val pkg: String)
 
-// बोलते समय इन शब्दों को हटा देते हैं
+// ---------- टॉर्च ----------
+fun torchCommand(heard: String): Boolean? {
+    val c = heard.lowercase()
+    val words = listOf("टॉर्च", "टार्च", "torch", "फ्लैश", "फ्लैशलाइट", "flashlight", "flash", "लाइट", "light")
+    if (words.none { c.contains(it) }) return null
+    val tokens = c.split(" ").map { it.trim() }
+    val off = tokens.any { it == "off" || it == "ऑफ" } || listOf("बंद", "बुझा").any { c.contains(it) }
+    val on = tokens.any { it == "on" || it == "ऑन" } || listOf("चालू", "जला", "शुरू").any { c.contains(it) }
+    return when {
+        off -> false
+        on -> true
+        else -> true
+    }
+}
+
+fun setTorch(context: Context, on: Boolean): String {
+    return try {
+        val cm = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+        val id = cm.cameraIdList.firstOrNull {
+            cm.getCameraCharacteristics(it).get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true
+        }
+        if (id == null) {
+            "इस फोन में टॉर्च नहीं मिली"
+        } else {
+            cm.setTorchMode(id, on)
+            if (on) "टॉर्च चालू कर दी" else "टॉर्च बंद कर दी"
+        }
+    } catch (e: Exception) {
+        "टॉर्च चालू नहीं हो पाई"
+    }
+}
+
+// ---------- आवाज़ (Volume) ----------
+fun volumeCommand(context: Context, heard: String): String? {
+    val c = heard.lowercase()
+    val isVolume = listOf("आवाज", "वॉल्यूम", "वोल्यूम", "volume", "साउंड", "sound").any { c.contains(it) }
+    if (!isVolume) return null
+    val tokens = c.split(" ").map { it.trim() }
+    val raise = listOf("बढ़ा", "बढा", "तेज", "ज्यादा", "ज़्यादा").any { c.contains(it) } || tokens.contains("up")
+    val lower = listOf("घटा", "कम", "धीमी", "धीमा").any { c.contains(it) } || tokens.contains("down")
+    val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+    val dir = when {
+        raise -> AudioManager.ADJUST_RAISE
+        lower -> AudioManager.ADJUST_LOWER
+        else -> return "आवाज बढ़ानी है या घटानी है?"
+    }
+    am.adjustStreamVolume(AudioManager.STREAM_MUSIC, dir, AudioManager.FLAG_SHOW_UI)
+    return if (dir == AudioManager.ADJUST_RAISE) "आवाज बढ़ा दी" else "आवाज घटा दी"
+}
+
+// ---------- गाना (यूट्यूब खोज) ----------
+val songWords = listOf("गाना", "गाने", "गीत", "song", "बजा", "सुनाओ", "play", "चलाओ")
+
+fun isSongCommand(heard: String): Boolean {
+    val c = heard.lowercase()
+    return songWords.any { c.contains(it) }
+}
+
+val songFillers = setOf(
+    "वीर", "बजा", "बजाओ", "दो", "गाना", "गाने", "गीत", "नया", "नई", "नयी",
+    "trending", "ट्रेंडिंग", "वाला", "वाली", "का", "की", "के", "song", "songs",
+    "play", "सुनाओ", "चलाओ", "यूट्यूब", "youtube", "पर", "new", "ओपन", "खोलो"
+)
+
+fun songQuery(heard: String): String {
+    val base = heard.split(" ")
+        .map { it.trim() }
+        .filter { it.isNotBlank() && it.lowercase() !in songFillers }
+        .joinToString(" ")
+    return if (base.isBlank()) "trending" else base
+}
+
+fun playSong(context: Context, query: String): String {
+    val q = "$query new song"
+    val uri = Uri.parse("https://www.youtube.com/results?search_query=" + URLEncoder.encode(q, "UTF-8"))
+    val intent = Intent(Intent.ACTION_VIEW, uri)
+        .setPackage("com.google.android.youtube")
+        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    return try {
+        context.startActivity(intent)
+        "यूट्यूब पर $query खोल रहा हूँ, पहला गाना दबाइए"
+    } catch (e: Exception) {
+        context.startActivity(Intent(Intent.ACTION_VIEW, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        "$query का गाना खोल रहा हूँ"
+    }
+}
+
+// ---------- सभी ऐप ----------
 val fillerWords = setOf(
     "वीर", "veer", "खोलो", "खोल", "खोलिए", "ओपन", "open", "को", "ko",
     "ऐप", "app", "कर", "करो", "जरा", "please"
 )
 
-// बोले गए आम नाम को ऐप के असली नाम से जोड़ने के लिए
 val appAliases = mapOf(
     "व्हाट्सएप" to "whatsapp", "व्हाट्सऐप" to "whatsapp", "वाट्सएप" to "whatsapp",
     "यूट्यूब" to "youtube", "इंस्टाग्राम" to "instagram", "इंस्टा" to "instagram",
@@ -127,6 +216,7 @@ fun launchApp(context: Context, app: AppItem): Boolean {
     return true
 }
 
+// ---------- मैसेज (टाइप वाला) ----------
 fun isSendCommand(heard: String): Boolean {
     val c = heard.lowercase()
     return listOf("मैसेज", "मेसेज", "message", "संदेश", "भेज", "send").any { c.contains(it) }
@@ -175,6 +265,7 @@ fun openWhatsApp(context: Context, number: String, message: String) {
     }
 }
 
+// ---------- बोलने-सुनने का हिस्सा ----------
 fun startListening(context: Context, onResult: (List<String>) -> Unit, onStatus: (String) -> Unit) {
     val recognizer = SpeechRecognizer.createSpeechRecognizer(context)
     recognizer.setRecognitionListener(object : RecognitionListener {
@@ -201,6 +292,14 @@ fun startListening(context: Context, onResult: (List<String>) -> Unit, onStatus:
         putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5)
     }
     recognizer.startListening(intent)
+}
+
+// सभी आदेशों को एक जगह से चलाना: टॉर्च, आवाज़, गाना
+fun commandReply(context: Context, h: String): String? {
+    torchCommand(h)?.let { return setTorch(context, it) }
+    volumeCommand(context, h)?.let { return it }
+    if (isSongCommand(h)) return playSong(context, songQuery(h))
+    return null
 }
 
 @Composable
@@ -234,11 +333,22 @@ fun VeerScreen(onSpeak: (String) -> Unit) {
         }
         statusText = "आपने कहा: ${heardAll.first()}"
 
+        // 1. टॉर्च, आवाज़, गाना
+        for (h in heardAll) {
+            val reply = commandReply(context, h)
+            if (reply != null) {
+                speakAndShow(reply)
+                return
+            }
+        }
+
+        // 2. मैसेज वाला बोलकर हिस्सा अभी बंद है
         if (heardAll.any { isSendCommand(it) }) {
             speakAndShow("मैसेज वाला हिस्सा अभी बंद है। नीचे नाम टाइप करके मैसेज भेजो")
             return
         }
 
+        // 3. फोन के कोई भी ऐप
         for (h in heardAll) {
             val app = findApp(context, cleanAppQuery(h))
             if (app != null) {
@@ -247,6 +357,7 @@ fun VeerScreen(onSpeak: (String) -> Unit) {
                 return
             }
         }
+
         val asked = cleanAppQuery(heardAll.first()).ifBlank { heardAll.first() }
         speakAndShow("$asked नाम का ऐप फोन में नहीं मिला")
     }
