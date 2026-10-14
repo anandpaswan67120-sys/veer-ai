@@ -3,7 +3,6 @@ package com.veer.ai
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.net.Uri
 import android.os.Bundle
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
@@ -60,16 +59,23 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-// सुनी हुई बात से ऐप का पैकेज नाम चुनना
-fun findPackage(command: String): String? {
+// सुनी हुई बात से ऐप के संभावित पैकेज नाम चुनना
+fun findPackages(command: String): List<String> {
     val c = command.lowercase()
     return when {
-        c.contains("youtube") || c.contains("यूट्यूब") || c.contains("यूटयूब") -> "com.google.android.youtube"
-        c.contains("instagram") || c.contains("इंस्टाग्राम") || c.contains("इंस्टा") -> "com.instagram.android"
-        c.contains("maps") || c.contains("मैप") || c.contains("गूगल मैप") -> "com.google.android.apps.maps"
-        c.contains("camera") || c.contains("कैमरा") -> "com.android.camera"
-        c.contains("settings") || c.contains("सेटिंग") -> "com.android.settings"
-        else -> null
+        c.contains("youtube") || c.contains("यूट्यूब") || c.contains("यूटयूब") ->
+            listOf("com.google.android.youtube")
+        c.contains("instagram") || c.contains("इंस्टाग्राम") || c.contains("इंस्टा") ->
+            listOf("com.instagram.android")
+        c.contains("maps") || c.contains("मैप") ->
+            listOf("com.google.android.apps.maps")
+        c.contains("calculator") || c.contains("calc") || c.contains("कैलकुलेटर") || c.contains("कैलक्युलेटर") ->
+            listOf("com.vivo.calculator", "com.google.android.calculator", "com.android.calculator2")
+        c.contains("camera") || c.contains("कैमरा") ->
+            listOf("com.android.camera", "com.android.camera2")
+        c.contains("settings") || c.contains("सेटिंग") ->
+            listOf("com.android.settings")
+        else -> emptyList()
     }
 }
 
@@ -78,22 +84,29 @@ fun VeerScreen(onSpeak: (String) -> Unit) {
     val context = LocalContext.current
     var statusText by remember { mutableStateOf("नमस्ते, मैं वीर AI हूँ") }
 
-    fun handleCommand(heard: String) {
+    fun handleCommand(alternatives: List<String>) {
+        val matched = alternatives.firstOrNull { findPackages(it).isNotEmpty() }
+        val heard = matched ?: alternatives.firstOrNull() ?: ""
         statusText = "आपने कहा: $heard"
-        val pkg = findPackage(heard)
-        if (pkg == null) {
-            val reply = "जी, आपने कहा $heard"
-            onSpeak(reply)
+
+        val pkgs = findPackages(heard)
+        if (pkgs.isEmpty()) {
+            onSpeak("जी, आपने कहा $heard")
+            return
+        }
+
+        val launch = pkgs
+            .asSequence()
+            .mapNotNull { context.packageManager.getLaunchIntentForPackage(it) }
+            .firstOrNull()
+
+        if (launch != null) {
+            launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            context.startActivity(launch)
+            onSpeak("जी भाई, खोल रहा हूँ")
         } else {
-            val launch = context.packageManager.getLaunchIntentForPackage(pkg)
-            if (launch != null) {
-                launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                context.startActivity(launch)
-                onSpeak("जी भाई, खोल रहा हूँ")
-            } else {
-                onSpeak("माफ कीजिए, यह ऐप फोन में नहीं मिला")
-                statusText = "ऐप नहीं मिला"
-            }
+            onSpeak("माफ कीजिए, यह ऐप फोन में नहीं मिला")
+            statusText = "ऐप नहीं मिला"
         }
     }
 
@@ -133,7 +146,7 @@ fun VeerScreen(onSpeak: (String) -> Unit) {
 
 fun startListening(
     context: android.content.Context,
-    onResult: (String) -> Unit,
+    onResult: (List<String>) -> Unit,
     onStatus: (String) -> Unit
 ) {
     val recognizer = SpeechRecognizer.createSpeechRecognizer(context)
@@ -149,7 +162,7 @@ fun startListening(
         }
         override fun onResults(results: Bundle?) {
             val list = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-            onResult(list?.firstOrNull() ?: "")
+            onResult(list?.toList() ?: emptyList())
             recognizer.destroy()
         }
         override fun onPartialResults(partialResults: Bundle?) {}
@@ -158,6 +171,7 @@ fun startListening(
     val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
         putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
         putExtra(RecognizerIntent.EXTRA_LANGUAGE, "hi-IN")
+        putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5)
     }
     recognizer.startListening(intent)
 }
