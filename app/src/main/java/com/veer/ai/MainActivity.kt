@@ -37,6 +37,7 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import java.net.URLEncoder
 import java.util.Locale
+import kotlin.math.abs
 
 class MainActivity : ComponentActivity() {
     private var tts: TextToSpeech? = null
@@ -64,55 +65,96 @@ class MainActivity : ComponentActivity() {
 }
 
 data class ContactItem(val name: String, val number: String)
+data class AppItem(val label: String, val pkg: String)
 
-// बोले गए वाक्य से सिर्फ नाम निकालना
-val commandWords = setOf(
-    "वीर", "veer", "को", "ko", "मैसेज", "मेसेज", "message", "संदेश", "भेजो", "भेज",
-    "भेजना", "भेजिए", "send", "करो", "कर", "लिखो", "बोलो", "कि", "व्हाट्सएप", "whatsapp"
+// बोलते समय इन शब्दों को हटा देते हैं
+val fillerWords = setOf(
+    "वीर", "veer", "खोलो", "खोल", "खोलिए", "ओपन", "open", "को", "ko",
+    "ऐप", "app", "कर", "करो", "जरा", "please"
 )
 
-fun extractName(heard: String): String =
-    heard.split(" ")
+// बोले गए आम नाम को ऐप के असली नाम से जोड़ने के लिए
+val appAliases = mapOf(
+    "व्हाट्सएप" to "whatsapp", "व्हाट्सऐप" to "whatsapp", "वाट्सएप" to "whatsapp",
+    "यूट्यूब" to "youtube", "इंस्टाग्राम" to "instagram", "इंस्टा" to "instagram",
+    "फेसबुक" to "facebook", "क्रोम" to "chrome", "जीमेल" to "gmail",
+    "स्पॉटिफाई" to "spotify", "पेटीएम" to "paytm", "फोटो" to "photos",
+    "गूगल मैप्स" to "maps", "मैप्स" to "maps", "मैप" to "maps",
+    "कैमरा" to "camera", "कैलकुलेटर" to "calculator", "कैलक्युलेटर" to "calculator",
+    "सेटिंग्स" to "settings", "सेटिंग" to "settings", "कैलेंडर" to "calendar",
+    "नोट्स" to "notes", "गूगल" to "google"
+)
+
+fun cleanAppQuery(heard: String): String {
+    val words = heard.split(" ")
         .map { it.trim() }
-        .filter { it.isNotBlank() && it.lowercase() !in commandWords }
-        .joinToString(" ")
+        .filter { it.isNotBlank() && it.lowercase() !in fillerWords }
+    var q = words.joinToString(" ")
+    for ((hi, en) in appAliases.entries.sortedByDescending { it.key.length }) {
+        q = q.replace(hi, en, ignoreCase = true)
+    }
+    return q
+}
+
+fun normalize(s: String): String = s.lowercase().replace(" ", "")
+
+fun installedApps(context: Context): List<AppItem> {
+    val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+    val pm = context.packageManager
+    return pm.queryIntentActivities(intent, 0)
+        .map { AppItem(it.loadLabel(pm).toString(), it.activityInfo.packageName) }
+        .distinctBy { it.pkg }
+}
+
+fun findApp(context: Context, query: String): AppItem? {
+    val q = normalize(query)
+    if (q.isBlank()) return null
+    val apps = installedApps(context)
+    val exact = apps.firstOrNull { normalize(it.label) == q }
+    if (exact != null) return exact
+    return apps
+        .filter { app ->
+            val l = normalize(app.label)
+            l.isNotBlank() && (l.contains(q) || (l.length >= 3 && q.contains(l)))
+        }
+        .minByOrNull { abs(normalize(it.label).length - q.length) }
+}
+
+fun launchApp(context: Context, app: AppItem): Boolean {
+    val intent = context.packageManager.getLaunchIntentForPackage(app.pkg) ?: return false
+    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    context.startActivity(intent)
+    return true
+}
 
 fun isSendCommand(heard: String): Boolean {
     val c = heard.lowercase()
-    return listOf("मैसेज", "मेसेज", "message", "संदेश", "भेज", "send", "व्हाट्सएप", "whatsapp")
-        .any { c.contains(it) }
+    return listOf("मैसेज", "मेसेज", "message", "संदेश", "भेज", "send").any { c.contains(it) }
 }
 
 fun findContacts(context: Context, name: String): List<ContactItem> {
     val result = mutableListOf<ContactItem>()
-    // पूरा नाम और हर शब्द अलग-अलग दोनों से खोजो
-    val terms = (listOf(name) + name.split(" ").filter { it.length >= 2 }).distinct()
     try {
-        for (term in terms) {
-            context.contentResolver.query(
-                ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
-                arrayOf(
-                    ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME,
-                    ContactsContract.CommonDataKinds.Phone.NUMBER
-                ),
-                "${ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME} LIKE ?",
-                arrayOf("%$term%"),
-                null
-            )?.use { cursor ->
-                while (cursor.moveToNext()) {
-                    val cName = cursor.getString(0) ?: continue
-                    val cNum = cursor.getString(1) ?: continue
-                    if (result.none { it.number == cNum }) result.add(ContactItem(cName, cNum))
-                }
+        context.contentResolver.query(
+            ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
+            arrayOf(
+                ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME,
+                ContactsContract.CommonDataKinds.Phone.NUMBER
+            ),
+            "${ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME} LIKE ?",
+            arrayOf("%$name%"),
+            null
+        )?.use { cursor ->
+            while (cursor.moveToNext()) {
+                val cName = cursor.getString(0) ?: continue
+                val cNum = cursor.getString(1) ?: continue
+                if (result.none { it.number == cNum }) result.add(ContactItem(cName, cNum))
             }
         }
     } catch (e: SecurityException) {
         return emptyList()
     }
-    // पूरे नाम से मेल खाने वाले कॉन्टैक्ट सबसे ऊपर
-    return result.sortedByDescending { c ->
-        name.split(" ").count { w -> c.name.contains(w, ignoreCase = true) }
-    }
+    return result
 }
 
 fun openWhatsApp(context: Context, number: String, message: String) {
@@ -130,35 +172,6 @@ fun openWhatsApp(context: Context, number: String, message: String) {
         context.startActivity(
             Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         )
-    }
-}
-
-fun findPackages(command: String): List<String> {
-    val c = command.lowercase()
-    return when {
-        c.contains("youtube") || c.contains("यूट्यूब") -> listOf("com.google.android.youtube")
-        c.contains("instagram") || c.contains("इंस्टाग्राम") -> listOf("com.instagram.android")
-        c.contains("maps") || c.contains("मैप") -> listOf("com.google.android.apps.maps")
-        c.contains("calculator") || c.contains("कैलकुलेटर") ->
-            listOf("com.vivo.calculator", "com.google.android.calculator", "com.android.calculator2")
-        c.contains("camera") || c.contains("कैमरा") -> listOf("com.android.camera", "com.android.camera2")
-        c.contains("settings") || c.contains("सेटिंग") -> listOf("com.android.settings")
-        else -> emptyList()
-    }
-}
-
-fun openApp(context: Context, heard: String): String {
-    val pkgs = findPackages(heard)
-    if (pkgs.isEmpty()) return "जी, आपने कहा $heard"
-    val launch = pkgs.asSequence()
-        .mapNotNull { context.packageManager.getLaunchIntentForPackage(it) }
-        .firstOrNull()
-    return if (launch != null) {
-        launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        context.startActivity(launch)
-        "जी भाई, खोल रहा हूँ"
-    } else {
-        "माफ कीजिए, यह ऐप फोन में नहीं मिला"
     }
 }
 
@@ -197,102 +210,45 @@ fun VeerScreen(onSpeak: (String) -> Unit) {
     var nameInput by remember { mutableStateOf("") }
     var messageInput by remember { mutableStateOf("") }
     var choices by remember { mutableStateOf<List<ContactItem>>(emptyList()) }
-    // pendingContact: कॉन्टैक्ट चुना जा चुका है, अब संदेश बोलना है
-    var pendingContact by remember { mutableStateOf<ContactItem?>(null) }
 
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { results ->
-        statusText = if (results[Manifest.permission.RECORD_AUDIO] == true &&
-            results[Manifest.permission.READ_CONTACTS] == true
-        ) "अनुमति मिल गई, अब बोलिए" else "माइक या कॉन्टैक्ट की अनुमति नहीं मिली"
+        statusText = if (results[Manifest.permission.RECORD_AUDIO] == true) {
+            "अनुमति मिल गई, अब बोलिए"
+        } else {
+            "माइक की अनुमति नहीं मिली"
+        }
     }
 
-    fun sendTo(contact: ContactItem, message: String) {
-        openWhatsApp(context, contact.number, message)
-        val msg = "${contact.name} के चैट में संदेश भर दिया। WhatsApp में भेजें दबाइए"
-        statusText = msg
-        onSpeak(msg)
-        choices = emptyList()
-        pendingContact = null
+    fun speakAndShow(text: String) {
+        statusText = text
+        onSpeak(text)
     }
 
-    fun listenOnce(onText: (String) -> Unit) {
-        startListening(context, onResult = { list ->
-            val heard = list.firstOrNull { it.isNotBlank() } ?: ""
-            if (heard.isBlank()) {
-                statusText = "कुछ सुनाई नहीं दिया, फिर से बोलिए"
-                onSpeak("कुछ सुनाई नहीं दिया, फिर से बोलिए")
-            } else onText(heard)
-        }, onStatus = { statusText = it })
-    }
-
-    // कॉन्टैक्ट मिलने के बाद चुने हुए कॉन्टैक्ट को संदेश बोलकर भेजना
-    fun askMessageAndSend(contact: ContactItem) {
-        pendingContact = contact
-        choices = emptyList()
-        val q = "${contact.name} को क्या संदेश भेजूँ?"
-        statusText = q
-        onSpeak(q)
-        listenOnce { msg -> sendTo(contact, msg) }
-    }
-
-    fun handleName(rawName: String) {
-        val name = extractName(rawName)
-        if (name.isBlank()) {
-            statusText = "नाम दोबारा बोलिए"
-            onSpeak("नाम दोबारा बोलिए")
-            listenOnce { handleName(it) }
+    fun handleVoice(list: List<String>) {
+        val heardAll = list.filter { it.isNotBlank() }
+        if (heardAll.isEmpty()) {
+            speakAndShow("कुछ सुनाई नहीं दिया, फिर से बोलिए")
             return
         }
-        nameInput = name
-        val found = findContacts(context, name)
-        when {
-            found.isEmpty() -> {
-                statusText = "$name नाम का कॉन्टैक्ट नहीं मिला। नाम दोबारा बोलिए"
-                onSpeak("$name नाम का कॉन्टैक्ट नहीं मिला। नाम दोबारा बोलिए")
-                listenOnce { handleName(it) }
-            }
-            found.size == 1 -> askMessageAndSend(found[0])
-            else -> {
-                choices = found.take(5)
-                val q = "$name के ${choices.size} कॉन्टैक्ट मिले। नीचे से चुनिए, या बोलिए एक, दो, तीन"
-                statusText = q
-                onSpeak(q)
-                listenOnce { pick ->
-                    val idx = listOf("एक" to 1, "1" to 1, "दो" to 2, "2" to 2, "तीन" to 3, "3" to 3, "चार" to 4, "4" to 4, "पाँच" to 5, "5" to 5)
-                        .firstOrNull { pick.contains(it.first) }?.second
-                    if (idx != null && idx <= choices.size) askMessageAndSend(choices[idx - 1])
-                    else {
-                        statusText = "नीचे से कॉन्टैक्ट चुनिए"
-                        onSpeak("नीचे से कॉन्टैक्ट चुनिए")
-                    }
-                }
-            }
-        }
-    }
+        statusText = "आपने कहा: ${heardAll.first()}"
 
-    fun startVoiceFlow() {
-        val granted = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
-            PackageManager.PERMISSION_GRANTED
-        if (!granted) {
-            permissionLauncher.launch(arrayOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.READ_CONTACTS))
+        if (heardAll.any { isSendCommand(it) }) {
+            speakAndShow("मैसेज वाला हिस्सा अभी बंद है। नीचे नाम टाइप करके मैसेज भेजो")
             return
         }
-        listenOnce { heard ->
-            if (isSendCommand(heard)) {
-                val name = extractName(heard)
-                if (name.isBlank()) {
-                    statusText = "किसे मैसेज भेजना है? नाम बोलिए"
-                    onSpeak("किसे मैसेज भेजना है?")
-                    listenOnce { handleName(it) }
-                } else handleName(heard)
-            } else {
-                val reply = openApp(context, heard)
-                statusText = reply
-                onSpeak(reply)
+
+        for (h in heardAll) {
+            val app = findApp(context, cleanAppQuery(h))
+            if (app != null) {
+                if (launchApp(context, app)) speakAndShow("जी भाई, ${app.label} खोल रहा हूँ")
+                else speakAndShow("${app.label} नहीं खुल पाया")
+                return
             }
         }
+        val asked = cleanAppQuery(heardAll.first()).ifBlank { heardAll.first() }
+        speakAndShow("$asked नाम का ऐप फोन में नहीं मिला")
     }
 
     Column(
@@ -320,13 +276,22 @@ fun VeerScreen(onSpeak: (String) -> Unit) {
         Button(
             onClick = {
                 val name = nameInput.trim()
-                if (name.isBlank()) { statusText = "पहले नाम लिखिए"; return@Button }
-                if (messageInput.isBlank()) { statusText = "पहले संदेश लिखिए"; return@Button }
-                val found = findContacts(context, name)
-                when {
-                    found.size == 1 -> sendTo(found[0], messageInput)
-                    found.isEmpty() -> statusText = "$name नाम का कॉन्टैक्ट नहीं मिला"
-                    else -> { choices = found.take(5); statusText = "नीचे से चुनिए" }
+                if (name.isBlank()) {
+                    statusText = "पहले नाम लिखिए"
+                } else if (messageInput.isBlank()) {
+                    statusText = "पहले संदेश लिखिए"
+                } else {
+                    val found = findContacts(context, name)
+                    if (found.size == 1) {
+                        openWhatsApp(context, found[0].number, messageInput)
+                        speakAndShow("${found[0].name} के चैट में संदेश भर दिया। WhatsApp में भेजें दबाइए")
+                        choices = emptyList()
+                    } else if (found.isEmpty()) {
+                        speakAndShow("$name नाम का कॉन्टैक्ट नहीं मिला")
+                    } else {
+                        choices = found.take(5)
+                        statusText = "नीचे से कॉन्टैक्ट चुनिए"
+                    }
                 }
             },
             modifier = Modifier.padding(top = 12.dp)
@@ -337,8 +302,9 @@ fun VeerScreen(onSpeak: (String) -> Unit) {
         choices.forEach { c ->
             Button(
                 onClick = {
-                    if (messageInput.isNotBlank()) sendTo(c, messageInput)
-                    else askMessageAndSend(c)
+                    openWhatsApp(context, c.number, messageInput)
+                    speakAndShow("${c.name} के चैट में संदेश भर दिया")
+                    choices = emptyList()
                 },
                 modifier = Modifier.fillMaxWidth().padding(top = 6.dp)
             ) {
@@ -346,7 +312,22 @@ fun VeerScreen(onSpeak: (String) -> Unit) {
             }
         }
 
-        Button(onClick = { startVoiceFlow() }, modifier = Modifier.padding(top = 16.dp)) {
+        Button(
+            onClick = {
+                val granted = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
+                    PackageManager.PERMISSION_GRANTED
+                if (!granted) {
+                    permissionLauncher.launch(arrayOf(Manifest.permission.RECORD_AUDIO))
+                } else {
+                    startListening(
+                        context,
+                        onResult = { handleVoice(it) },
+                        onStatus = { statusText = it }
+                    )
+                }
+            },
+            modifier = Modifier.padding(top = 16.dp)
+        ) {
             Text("बोलो")
         }
     }
