@@ -40,6 +40,7 @@ import java.util.Locale
 
 class MainActivity : ComponentActivity() {
     private var tts: TextToSpeech? = null
+    private var controller: VeerController? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -52,11 +53,28 @@ class MainActivity : ComponentActivity() {
             MaterialTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
                     VeerScreen(
-                        onSpeak = { text -> tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, null) }
+                        onSpeak = { text, done -> speakThen(text, done) }
                     )
                 }
             }
         }
+    }
+
+    // बोलना खत्म होने के बाद ही done() चलेगा, ताकि वीर अपनी आवाज न सुने
+    fun speakThen(text: String, done: () -> Unit) {
+        val id = "veer_${System.currentTimeMillis()}"
+        tts?.setOnUtteranceProgressListener(object : android.speech.tts.UtteranceProgressListener() {
+            override fun onStart(utteranceId: String?) {}
+            override fun onDone(utteranceId: String?) {
+                if (utteranceId == id) Handler(Looper.getMainLooper()).post { done() }
+            }
+            @Deprecated("Deprecated in Java")
+            override fun onError(utteranceId: String?) {
+                if (utteranceId == id) Handler(Looper.getMainLooper()).post { done() }
+            }
+        })
+        val params = Bundle()
+        tts?.speak(text, TextToSpeech.QUEUE_FLUSH, params, id)
     }
 
     override fun onDestroy() {
@@ -80,6 +98,11 @@ fun isMessageCommand(text: String): Boolean {
     val c = text.lowercase()
     if (c.contains("खोल") || c.contains("open")) return false
     return listOf("मैसेज", "message", "संदेश", "भेज", "व्हाट्सएप", "whatsapp", "send").any { c.contains(it) }
+}
+
+fun isWakeWord(text: String): Boolean {
+    val c = text.lowercase()
+    return c.contains("वीर") || c.contains("veer") || c.contains("बीर")
 }
 
 fun pickIndex(text: String, max: Int): Int? {
@@ -136,7 +159,7 @@ fun openWhatsApp(context: Context, number: String, message: String) {
 
 class VeerController(
     private val context: Context,
-    private val speak: (String) -> Unit,
+    private val speak: (String, () -> Unit) -> Unit,
     private val setStatus: (String) -> Unit
 ) {
     private var mode = "idle"
@@ -145,20 +168,27 @@ class VeerController(
     private var targetNumber = ""
     private val handler = Handler(Looper.getMainLooper())
 
+    // आदेश सुनने के लिए माइक चालू करो
     fun listen() {
+        setStatus("सुन रहा हूँ...")
         startListening(context, onResult = { handle(it) }, onStatus = setStatus)
     }
 
+    // पहले बोलो, बोलना खत्म होने पर सुनो
     private fun ask(question: String, nextMode: String) {
         mode = nextMode
-        speak(question)
-        handler.postDelayed({ listen() }, 3000)
+        speak(question) { listen() }
+    }
+
+    private fun say(text: String) {
+        mode = "idle"
+        speak(text) { setStatus("बोलो") }
     }
 
     private fun handle(alternatives: List<String>) {
         val heard = alternatives.firstOrNull { it.isNotBlank() } ?: ""
         if (heard.isBlank()) {
-            speak("कुछ सुनाई नहीं दिया, फिर से बोलिए")
+            say("कुछ सुनाई नहीं दिया, फिर से बोलिए")
             return
         }
         setStatus("आपने कहा: $heard")
@@ -168,9 +198,12 @@ class VeerController(
             "ask_choice" -> pickContact(heard)
             "ask_message" -> sendMessage(heard)
             else -> {
+                if (!isWakeWord(heard) && mode == "idle") {
+                    // बिना वीर कहे भी आदेश मान लो, पर बातचीत की तरह
+                }
                 if (isMessageCommand(heard)) {
                     val name = extractName(heard)
-                    if (name.isBlank()) ask("किसे मैसेज भेजना है?", "ask_name")
+                    if (name.isBlank()) ask("जी बोलिए, किसे मैसेज भेजना है?", "ask_name")
                     else searchContact(name)
                 } else {
                     openApp(heard)
@@ -208,10 +241,7 @@ class VeerController(
         val name = extractName(rawName).ifBlank { rawName }
         val found = findContacts(name)
         when {
-            found.isEmpty() -> {
-                mode = "idle"
-                speak("$name नाम का कॉन्टैक्ट नहीं मिला। कॉन्टैक्ट की अनुमति भी जाँचिए")
-            }
+            found.isEmpty() -> say("$name नाम का कॉन्टैक्ट नहीं मिला। कॉन्टैक्ट की अनुमति जाँचिए")
             found.size == 1 -> {
                 targetName = found[0].name
                 targetNumber = found[0].number
@@ -240,15 +270,14 @@ class VeerController(
     }
 
     private fun sendMessage(text: String) {
-        mode = "idle"
         openWhatsApp(context, targetNumber, text)
-        speak("$targetName के चैट में संदेश भर दिया है। भेजने के लिए WhatsApp में भेजें बटन दबाइए")
+        say("$targetName के चैट में संदेश भर दिया है। भेजने के लिए WhatsApp में भेजें बटन दबाइए")
     }
 
     private fun openApp(heard: String) {
         val pkgs = findPackages(heard)
         if (pkgs.isEmpty()) {
-            speak("जी, आपने कहा $heard")
+            say("जी, आपने कहा $heard")
             return
         }
         val launch = pkgs
@@ -258,18 +287,20 @@ class VeerController(
         if (launch != null) {
             launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             context.startActivity(launch)
-            speak("जी भाई, खोल रहा हूँ")
+            say("जी भाई, खोल रहा हूँ")
         } else {
-            speak("माफ कीजिए, यह ऐप फोन में नहीं मिला")
+            say("माफ कीजिए, यह ऐप फोन में नहीं मिला")
         }
     }
 }
 
 @Composable
-fun VeerScreen(onSpeak: (String) -> Unit) {
+fun VeerScreen(onSpeak: (String, () -> Unit) -> Unit) {
     val context = LocalContext.current
     var statusText by remember { mutableStateOf("नमस्ते, मैं वीर AI हूँ") }
-    val controller = remember { VeerController(context, onSpeak) { statusText = it } }
+    val controller = remember {
+        VeerController(context, onSpeak) { statusText = it }
+    }
 
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
