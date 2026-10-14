@@ -6,6 +6,8 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.provider.ContactsContract
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
@@ -17,7 +19,6 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -138,6 +139,34 @@ fun openApp(context: Context, heard: String): String {
     }
 }
 
+fun startListening(context: Context, onResult: (List<String>) -> Unit, onStatus: (String) -> Unit) {
+    val recognizer = SpeechRecognizer.createSpeechRecognizer(context)
+    recognizer.setRecognitionListener(object : RecognitionListener {
+        override fun onReadyForSpeech(params: Bundle?) { onStatus("सुन रहा हूँ...") }
+        override fun onBeginningOfSpeech() {}
+        override fun onRmsChanged(rmsdB: Float) {}
+        override fun onBufferReceived(buffer: ByteArray?) {}
+        override fun onEndOfSpeech() { onStatus("समझ रहा हूँ...") }
+        override fun onError(error: Int) {
+            onStatus("कुछ समझ नहीं आया, फिर से बोलिए")
+            recognizer.destroy()
+        }
+        override fun onResults(results: Bundle?) {
+            val list = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+            onResult(list?.toList() ?: emptyList())
+            recognizer.destroy()
+        }
+        override fun onPartialResults(partialResults: Bundle?) {}
+        override fun onEvent(eventType: Int, params: Bundle?) {}
+    })
+    val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+        putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+        putExtra(RecognizerIntent.EXTRA_LANGUAGE, "hi-IN")
+        putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5)
+    }
+    recognizer.startListening(intent)
+}
+
 @Composable
 fun VeerScreen(onSpeak: (String) -> Unit) {
     val context = LocalContext.current
@@ -145,42 +174,88 @@ fun VeerScreen(onSpeak: (String) -> Unit) {
     var nameInput by remember { mutableStateOf("") }
     var messageInput by remember { mutableStateOf("") }
     var choices by remember { mutableStateOf<List<ContactItem>>(emptyList()) }
+    // बोलकर भरने के लिए चरण: "name" -> नाम पूछा, "message" -> संदेश पूछा
+    var step by remember { mutableStateOf("idle") }
 
     val permissionLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { granted ->
-        statusText = if (granted) "अनुमति मिल गई, अब नाम लिखकर भेजें" else "कॉन्टैक्ट की अनुमति नहीं मिली"
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { results ->
+        if (results[Manifest.permission.RECORD_AUDIO] == true &&
+            results[Manifest.permission.READ_CONTACTS] == true
+        ) {
+            statusText = "अनुमति मिल गई, अब बोलिए या टाइप कीजिए"
+        } else {
+            statusText = "माइक या कॉन्टैक्ट की अनुमति नहीं मिली"
+        }
     }
 
-    fun sendTo(contact: ContactItem) {
-        openWhatsApp(context, contact.number, messageInput)
+    fun sendTo(contact: ContactItem, message: String) {
+        openWhatsApp(context, contact.number, message)
         statusText = "${contact.name} के चैट में संदेश भर दिया। WhatsApp में भेजें दबाइए"
         onSpeak("${contact.name} के चैट में संदेश भर दिया है")
         choices = emptyList()
+        step = "idle"
     }
 
-    fun onSendClick() {
-        if (ContextCompat.checkSelfPermission(context, Manifest.permission.READ_CONTACTS)
-            != PackageManager.PERMISSION_GRANTED
-        ) {
-            permissionLauncher.launch(Manifest.permission.READ_CONTACTS)
-            return
-        }
-        val name = nameInput.trim()
-        if (name.isBlank()) { statusText = "पहले नाम लिखिए"; return }
-        if (messageInput.isBlank()) { statusText = "पहले संदेश लिखिए"; return }
-
+    fun resolveName(name: String) {
+        nameInput = name
         val found = findContacts(context, name)
         when {
             found.isEmpty() -> {
                 statusText = "$name नाम का कॉन्टैक्ट नहीं मिला"
                 onSpeak("$name नाम का कॉन्टैक्ट नहीं मिला")
+                step = "idle"
             }
-            found.size == 1 -> sendTo(found[0])
+            found.size == 1 -> {
+                // एक ही कॉन्टैक्ट: सीधे संदेश पूछो
+                step = "message"
+                onSpeak("${found[0].name} को क्या संदेश भेजूँ?")
+                statusText = "${found[0].name}, संदेश बोलिए"
+                choices = found
+            }
             else -> {
                 choices = found.take(5)
                 statusText = "${choices.size} कॉन्टैक्ट मिले, नीचे से चुनिए"
                 onSpeak("${choices.size} कॉन्टैक्ट मिले, नीचे से चुनिए")
+                step = "choose"
+            }
+        }
+    }
+
+    fun listenFor(onText: (String) -> Unit) {
+        startListening(context, onResult = { list ->
+            val heard = list.firstOrNull { it.isNotBlank() } ?: ""
+            if (heard.isBlank()) statusText = "कुछ सुनाई नहीं दिया" else onText(heard)
+        }, onStatus = { statusText = it })
+    }
+
+    fun startVoiceFlow() {
+        val granted = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
+        if (!granted) {
+            permissionLauncher.launch(arrayOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.READ_CONTACTS))
+            return
+        }
+        onSpeak("जी बोलिए")
+        listenFor { heard ->
+            val lower = heard.lowercase()
+            val isSend = listOf("मैसेज", "message", "संदेश", "भेज").any { lower.contains(it) }
+            if (isSend) {
+                // "राहुल को मैसेज भेजो" -> नाम निकालो
+                val name = heard.split(" ")
+                    .filter { it.isNotBlank() && it.lowercase() !in listOf("वीर", "veer", "को", "मैसेज", "भेजो", "संदेश", "message", "भेज") }
+                    .joinToString(" ")
+                if (name.isBlank()) {
+                    onSpeak("किसे मैसेज भेजना है?")
+                    step = "name"
+                    listenFor { n -> resolveName(n) }
+                } else {
+                    resolveName(name)
+                }
+            } else {
+                val pkgs = findPackages(heard)
+                if (pkgs.isNotEmpty()) onSpeak(openApp(context, heard))
+                else onSpeak("जी, आपने कहा $heard")
             }
         }
     }
@@ -207,17 +282,40 @@ fun VeerScreen(onSpeak: (String) -> Unit) {
             modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
         )
 
-        Button(onClick = { onSendClick() }, modifier = Modifier.padding(top = 12.dp)) {
+        Button(
+            onClick = {
+                val name = nameInput.trim()
+                if (name.isBlank()) { statusText = "पहले नाम लिखिए"; return@Button }
+                if (messageInput.isBlank()) { statusText = "पहले संदेश लिखिए"; return@Button }
+                val found = findContacts(context, name)
+                if (found.size == 1) sendTo(found[0], messageInput)
+                else if (found.isEmpty()) statusText = "$name नाम का कॉन्टैक्ट नहीं मिला"
+                else { choices = found.take(5); statusText = "नीचे से चुनिए" }
+            },
+            modifier = Modifier.padding(top = 12.dp)
+        ) {
             Text("मैसेज भेजो")
         }
 
         choices.forEach { c ->
-            Button(onClick = { sendTo(c) }, modifier = Modifier.fillMaxWidth().padding(top = 6.dp)) {
+            Button(
+                onClick = {
+                    val msg = if (messageInput.isNotBlank()) messageInput else ""
+                    if (msg.isBlank()) {
+                        // संदेश बोलकर पूछो
+                        step = "message"
+                        choices = listOf(c)
+                        onSpeak("${c.name} को क्या संदेश भेजूँ?")
+                        listenFor { m -> sendTo(c, m) }
+                    } else sendTo(c, msg)
+                },
+                modifier = Modifier.fillMaxWidth().padding(top = 6.dp)
+            ) {
                 Text("${c.name} (आखिरी अंक ${c.number.takeLast(4)})")
             }
         }
 
-        Button(onClick = { onSpeak("नमस्ते, मैं वीर AI हूँ") }, modifier = Modifier.padding(top = 16.dp)) {
+        Button(onClick = { startVoiceFlow() }, modifier = Modifier.padding(top = 16.dp)) {
             Text("बोलो")
         }
     }
