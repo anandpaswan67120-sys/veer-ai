@@ -71,17 +71,19 @@ data class ContactItem(val name: String, val number: String)
 data class AppItem(val label: String, val pkg: String)
 
 // ---------- टॉर्च ----------
+// सिर्फ तभी टॉर्च का आदेश मानो जब टॉर्च का शब्द + चालू/बंद दोनों में से कोई शब्द हो
 fun torchCommand(heard: String): Boolean? {
     val c = heard.lowercase()
-    val words = listOf("टॉर्च", "टार्च", "torch", "फ्लैश", "फ्लैशलाइट", "flashlight", "flash", "लाइट", "light")
-    if (words.none { c.contains(it) }) return null
-    val tokens = c.split(" ").map { it.trim() }
-    val off = tokens.any { it == "off" || it == "ऑफ" } || listOf("बंद", "बुझा").any { c.contains(it) }
-    val on = tokens.any { it == "on" || it == "ऑन" } || listOf("चालू", "जला", "शुरू").any { c.contains(it) }
+    val torchWords = listOf("टॉर्च", "टार्च", "torch", "फ्लैश", "फ्लैशलाइट", "flashlight", "flash", "लाइट", "light")
+    if (torchWords.none { c.contains(it) }) return null
+    val offWords = listOf("बंद", "बुझा", "off", "ऑफ")
+    val onWords = listOf("चालू", "जला", "शुरू", "on", "ऑन")
+    val off = offWords.any { c.contains(it) }
+    val on = onWords.any { c.contains(it) }
     return when {
         off -> false
         on -> true
-        else -> true
+        else -> null
     }
 }
 
@@ -102,26 +104,29 @@ fun setTorch(context: Context, on: Boolean): String {
     }
 }
 
-// ---------- आवाज़ (Volume) ----------
+// ---------- आवाज़ ----------
 fun volumeCommand(context: Context, heard: String): String? {
     val c = heard.lowercase()
     val isVolume = listOf("आवाज", "वॉल्यूम", "वोल्यूम", "volume", "साउंड", "sound").any { c.contains(it) }
     if (!isVolume) return null
-    val tokens = c.split(" ").map { it.trim() }
-    val raise = listOf("बढ़ा", "बढा", "तेज", "ज्यादा", "ज़्यादा").any { c.contains(it) } || tokens.contains("up")
-    val lower = listOf("घटा", "कम", "धीमी", "धीमा").any { c.contains(it) } || tokens.contains("down")
+    val raise = listOf("बढ़ा", "बढा", "तेज", "ज्यादा", "ज़्यादा", "up").any { c.contains(it) }
+    val lower = listOf("घटा", "कम", "धीमी", "धीमा", "down").any { c.contains(it) }
     val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-    val dir = when {
-        raise -> AudioManager.ADJUST_RAISE
-        lower -> AudioManager.ADJUST_LOWER
-        else -> return "आवाज बढ़ानी है या घटानी है?"
+    return when {
+        raise -> {
+            am.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_RAISE, AudioManager.FLAG_SHOW_UI)
+            "आवाज बढ़ा दी"
+        }
+        lower -> {
+            am.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_LOWER, AudioManager.FLAG_SHOW_UI)
+            "आवाज घटा दी"
+        }
+        else -> "आवाज बढ़ानी है या घटानी है?"
     }
-    am.adjustStreamVolume(AudioManager.STREAM_MUSIC, dir, AudioManager.FLAG_SHOW_UI)
-    return if (dir == AudioManager.ADJUST_RAISE) "आवाज बढ़ा दी" else "आवाज घटा दी"
 }
 
 // ---------- गाना (यूट्यूब खोज) ----------
-val songWords = listOf("गाना", "गाने", "गीत", "song", "बजा", "सुनाओ", "play", "चलाओ")
+val songWords = listOf("गाना", "गाने", "गीत", "song", "बजा", "सुनाओ")
 
 fun isSongCommand(heard: String): Boolean {
     val c = heard.lowercase()
@@ -294,7 +299,7 @@ fun startListening(context: Context, onResult: (List<String>) -> Unit, onStatus:
     recognizer.startListening(intent)
 }
 
-// सभी आदेशों को एक जगह से चलाना: टॉर्च, आवाज़, गाना
+// सभी आदेशों को एक जगह से चलाना
 fun commandReply(context: Context, h: String): String? {
     torchCommand(h)?.let { return setTorch(context, it) }
     volumeCommand(context, h)?.let { return it }
@@ -333,7 +338,6 @@ fun VeerScreen(onSpeak: (String) -> Unit) {
         }
         statusText = "आपने कहा: ${heardAll.first()}"
 
-        // 1. टॉर्च, आवाज़, गाना
         for (h in heardAll) {
             val reply = commandReply(context, h)
             if (reply != null) {
@@ -342,13 +346,11 @@ fun VeerScreen(onSpeak: (String) -> Unit) {
             }
         }
 
-        // 2. मैसेज वाला बोलकर हिस्सा अभी बंद है
         if (heardAll.any { isSendCommand(it) }) {
             speakAndShow("मैसेज वाला हिस्सा अभी बंद है। नीचे नाम टाइप करके मैसेज भेजो")
             return
         }
 
-        // 3. फोन के कोई भी ऐप
         for (h in heardAll) {
             val app = findApp(context, cleanAppQuery(h))
             if (app != null) {
