@@ -3,6 +3,7 @@
     package="com.veer.ai">
 
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.READ_CONTACTS" />
 
     <queries>
         <package android:name="com.google.android.youtube" />
@@ -14,6 +15,7 @@
         <package android:name="com.android.camera" />
         <package android:name="com.android.camera2" />
         <package android:name="com.android.settings" />
+        <package android:name="com.whatsapp" />
         <intent>
             <action android:name="android.speech.RecognitionService" />
         </intent>
