@@ -6,8 +6,6 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
 import android.provider.ContactsContract
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
@@ -67,29 +65,54 @@ class MainActivity : ComponentActivity() {
 
 data class ContactItem(val name: String, val number: String)
 
+// बोले गए वाक्य से सिर्फ नाम निकालना
+val commandWords = setOf(
+    "वीर", "veer", "को", "ko", "मैसेज", "मेसेज", "message", "संदेश", "भेजो", "भेज",
+    "भेजना", "भेजिए", "send", "करो", "कर", "लिखो", "बोलो", "कि", "व्हाट्सएप", "whatsapp"
+)
+
+fun extractName(heard: String): String =
+    heard.split(" ")
+        .map { it.trim() }
+        .filter { it.isNotBlank() && it.lowercase() !in commandWords }
+        .joinToString(" ")
+
+fun isSendCommand(heard: String): Boolean {
+    val c = heard.lowercase()
+    return listOf("मैसेज", "मेसेज", "message", "संदेश", "भेज", "send", "व्हाट्सएप", "whatsapp")
+        .any { c.contains(it) }
+}
+
 fun findContacts(context: Context, name: String): List<ContactItem> {
     val result = mutableListOf<ContactItem>()
+    // पूरा नाम और हर शब्द अलग-अलग दोनों से खोजो
+    val terms = (listOf(name) + name.split(" ").filter { it.length >= 2 }).distinct()
     try {
-        context.contentResolver.query(
-            ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
-            arrayOf(
-                ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME,
-                ContactsContract.CommonDataKinds.Phone.NUMBER
-            ),
-            "${ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME} LIKE ?",
-            arrayOf("%$name%"),
-            null
-        )?.use { cursor ->
-            while (cursor.moveToNext()) {
-                val cName = cursor.getString(0) ?: continue
-                val cNum = cursor.getString(1) ?: continue
-                if (result.none { it.number == cNum }) result.add(ContactItem(cName, cNum))
+        for (term in terms) {
+            context.contentResolver.query(
+                ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
+                arrayOf(
+                    ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME,
+                    ContactsContract.CommonDataKinds.Phone.NUMBER
+                ),
+                "${ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME} LIKE ?",
+                arrayOf("%$term%"),
+                null
+            )?.use { cursor ->
+                while (cursor.moveToNext()) {
+                    val cName = cursor.getString(0) ?: continue
+                    val cNum = cursor.getString(1) ?: continue
+                    if (result.none { it.number == cNum }) result.add(ContactItem(cName, cNum))
+                }
             }
         }
     } catch (e: SecurityException) {
         return emptyList()
     }
-    return result
+    // पूरे नाम से मेल खाने वाले कॉन्टैक्ट सबसे ऊपर
+    return result.sortedByDescending { c ->
+        name.split(" ").count { w -> c.name.contains(w, ignoreCase = true) }
+    }
 }
 
 fun openWhatsApp(context: Context, number: String, message: String) {
@@ -174,59 +197,79 @@ fun VeerScreen(onSpeak: (String) -> Unit) {
     var nameInput by remember { mutableStateOf("") }
     var messageInput by remember { mutableStateOf("") }
     var choices by remember { mutableStateOf<List<ContactItem>>(emptyList()) }
-    // बोलकर भरने के लिए चरण: "name" -> नाम पूछा, "message" -> संदेश पूछा
-    var step by remember { mutableStateOf("idle") }
+    // pendingContact: कॉन्टैक्ट चुना जा चुका है, अब संदेश बोलना है
+    var pendingContact by remember { mutableStateOf<ContactItem?>(null) }
 
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { results ->
-        if (results[Manifest.permission.RECORD_AUDIO] == true &&
+        statusText = if (results[Manifest.permission.RECORD_AUDIO] == true &&
             results[Manifest.permission.READ_CONTACTS] == true
-        ) {
-            statusText = "अनुमति मिल गई, अब बोलिए या टाइप कीजिए"
-        } else {
-            statusText = "माइक या कॉन्टैक्ट की अनुमति नहीं मिली"
-        }
+        ) "अनुमति मिल गई, अब बोलिए" else "माइक या कॉन्टैक्ट की अनुमति नहीं मिली"
     }
 
     fun sendTo(contact: ContactItem, message: String) {
         openWhatsApp(context, contact.number, message)
-        statusText = "${contact.name} के चैट में संदेश भर दिया। WhatsApp में भेजें दबाइए"
-        onSpeak("${contact.name} के चैट में संदेश भर दिया है")
+        val msg = "${contact.name} के चैट में संदेश भर दिया। WhatsApp में भेजें दबाइए"
+        statusText = msg
+        onSpeak(msg)
         choices = emptyList()
-        step = "idle"
+        pendingContact = null
     }
 
-    fun resolveName(name: String) {
+    fun listenOnce(onText: (String) -> Unit) {
+        startListening(context, onResult = { list ->
+            val heard = list.firstOrNull { it.isNotBlank() } ?: ""
+            if (heard.isBlank()) {
+                statusText = "कुछ सुनाई नहीं दिया, फिर से बोलिए"
+                onSpeak("कुछ सुनाई नहीं दिया, फिर से बोलिए")
+            } else onText(heard)
+        }, onStatus = { statusText = it })
+    }
+
+    // कॉन्टैक्ट मिलने के बाद चुने हुए कॉन्टैक्ट को संदेश बोलकर भेजना
+    fun askMessageAndSend(contact: ContactItem) {
+        pendingContact = contact
+        choices = emptyList()
+        val q = "${contact.name} को क्या संदेश भेजूँ?"
+        statusText = q
+        onSpeak(q)
+        listenOnce { msg -> sendTo(contact, msg) }
+    }
+
+    fun handleName(rawName: String) {
+        val name = extractName(rawName)
+        if (name.isBlank()) {
+            statusText = "नाम दोबारा बोलिए"
+            onSpeak("नाम दोबारा बोलिए")
+            listenOnce { handleName(it) }
+            return
+        }
         nameInput = name
         val found = findContacts(context, name)
         when {
             found.isEmpty() -> {
-                statusText = "$name नाम का कॉन्टैक्ट नहीं मिला"
-                onSpeak("$name नाम का कॉन्टैक्ट नहीं मिला")
-                step = "idle"
+                statusText = "$name नाम का कॉन्टैक्ट नहीं मिला। नाम दोबारा बोलिए"
+                onSpeak("$name नाम का कॉन्टैक्ट नहीं मिला। नाम दोबारा बोलिए")
+                listenOnce { handleName(it) }
             }
-            found.size == 1 -> {
-                // एक ही कॉन्टैक्ट: सीधे संदेश पूछो
-                step = "message"
-                onSpeak("${found[0].name} को क्या संदेश भेजूँ?")
-                statusText = "${found[0].name}, संदेश बोलिए"
-                choices = found
-            }
+            found.size == 1 -> askMessageAndSend(found[0])
             else -> {
                 choices = found.take(5)
-                statusText = "${choices.size} कॉन्टैक्ट मिले, नीचे से चुनिए"
-                onSpeak("${choices.size} कॉन्टैक्ट मिले, नीचे से चुनिए")
-                step = "choose"
+                val q = "$name के ${choices.size} कॉन्टैक्ट मिले। नीचे से चुनिए, या बोलिए एक, दो, तीन"
+                statusText = q
+                onSpeak(q)
+                listenOnce { pick ->
+                    val idx = listOf("एक" to 1, "1" to 1, "दो" to 2, "2" to 2, "तीन" to 3, "3" to 3, "चार" to 4, "4" to 4, "पाँच" to 5, "5" to 5)
+                        .firstOrNull { pick.contains(it.first) }?.second
+                    if (idx != null && idx <= choices.size) askMessageAndSend(choices[idx - 1])
+                    else {
+                        statusText = "नीचे से कॉन्टैक्ट चुनिए"
+                        onSpeak("नीचे से कॉन्टैक्ट चुनिए")
+                    }
+                }
             }
         }
-    }
-
-    fun listenFor(onText: (String) -> Unit) {
-        startListening(context, onResult = { list ->
-            val heard = list.firstOrNull { it.isNotBlank() } ?: ""
-            if (heard.isBlank()) statusText = "कुछ सुनाई नहीं दिया" else onText(heard)
-        }, onStatus = { statusText = it })
     }
 
     fun startVoiceFlow() {
@@ -236,26 +279,18 @@ fun VeerScreen(onSpeak: (String) -> Unit) {
             permissionLauncher.launch(arrayOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.READ_CONTACTS))
             return
         }
-        onSpeak("जी बोलिए")
-        listenFor { heard ->
-            val lower = heard.lowercase()
-            val isSend = listOf("मैसेज", "message", "संदेश", "भेज").any { lower.contains(it) }
-            if (isSend) {
-                // "राहुल को मैसेज भेजो" -> नाम निकालो
-                val name = heard.split(" ")
-                    .filter { it.isNotBlank() && it.lowercase() !in listOf("वीर", "veer", "को", "मैसेज", "भेजो", "संदेश", "message", "भेज") }
-                    .joinToString(" ")
+        listenOnce { heard ->
+            if (isSendCommand(heard)) {
+                val name = extractName(heard)
                 if (name.isBlank()) {
+                    statusText = "किसे मैसेज भेजना है? नाम बोलिए"
                     onSpeak("किसे मैसेज भेजना है?")
-                    step = "name"
-                    listenFor { n -> resolveName(n) }
-                } else {
-                    resolveName(name)
-                }
+                    listenOnce { handleName(it) }
+                } else handleName(heard)
             } else {
-                val pkgs = findPackages(heard)
-                if (pkgs.isNotEmpty()) onSpeak(openApp(context, heard))
-                else onSpeak("जी, आपने कहा $heard")
+                val reply = openApp(context, heard)
+                statusText = reply
+                onSpeak(reply)
             }
         }
     }
@@ -288,9 +323,11 @@ fun VeerScreen(onSpeak: (String) -> Unit) {
                 if (name.isBlank()) { statusText = "पहले नाम लिखिए"; return@Button }
                 if (messageInput.isBlank()) { statusText = "पहले संदेश लिखिए"; return@Button }
                 val found = findContacts(context, name)
-                if (found.size == 1) sendTo(found[0], messageInput)
-                else if (found.isEmpty()) statusText = "$name नाम का कॉन्टैक्ट नहीं मिला"
-                else { choices = found.take(5); statusText = "नीचे से चुनिए" }
+                when {
+                    found.size == 1 -> sendTo(found[0], messageInput)
+                    found.isEmpty() -> statusText = "$name नाम का कॉन्टैक्ट नहीं मिला"
+                    else -> { choices = found.take(5); statusText = "नीचे से चुनिए" }
+                }
             },
             modifier = Modifier.padding(top = 12.dp)
         ) {
@@ -300,14 +337,8 @@ fun VeerScreen(onSpeak: (String) -> Unit) {
         choices.forEach { c ->
             Button(
                 onClick = {
-                    val msg = if (messageInput.isNotBlank()) messageInput else ""
-                    if (msg.isBlank()) {
-                        // संदेश बोलकर पूछो
-                        step = "message"
-                        choices = listOf(c)
-                        onSpeak("${c.name} को क्या संदेश भेजूँ?")
-                        listenFor { m -> sendTo(c, m) }
-                    } else sendTo(c, msg)
+                    if (messageInput.isNotBlank()) sendTo(c, messageInput)
+                    else askMessageAndSend(c)
                 },
                 modifier = Modifier.fillMaxWidth().padding(top = 6.dp)
             ) {
